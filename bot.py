@@ -1,5 +1,7 @@
 import os
 import logging
+import asyncio
+from aiohttp import web
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -15,10 +17,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# توکن به صورت امن از محیط خوانده می‌شود
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# مدت زمان ماندگاری: ۲۴ ساعت (۸۶۴۰۰ ثانیه)
 EXPIRATION_SECONDS = 24 * 60 * 60
 
 
@@ -62,14 +61,41 @@ async def delete_expired_audio(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error deleting: {e}")
 
 
-def main():
+async def health_check(request):
+    return web.Response(text="Bot is running!")
+
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+
+async def main_async():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is not set!")
+
+    await run_web_server()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     audio_filter = filters.AUDIO | filters.VOICE | (filters.Document.Category("audio/"))
     app.add_handler(MessageHandler(audio_filter, handle_audio))
-    app.run_polling()
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    while True:
+        await asyncio.sleep(3600)
+
+
+def main():
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
