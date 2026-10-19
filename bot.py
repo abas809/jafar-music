@@ -221,7 +221,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args
 
-    # لینک ناشناس شخصی: anon_<شناسه گیرنده>
     if args and (args[0].startswith("anon_") or args[0] == "anon_chat"):
         raw = args[0].replace("anon_", "")
         target_id = OWNER_ID if raw == "chat" else (int(raw) if raw.isdigit() else None)
@@ -248,7 +247,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # لینک موزیک
     if args and args[0].startswith("music_"):
         music_id = args[0]
         item = shared_music.get(music_id)
@@ -274,7 +272,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("❌ ارسال فایل ممکن نشد؛ کمی بعد دوباره تلاش کنید.")
         return
 
-    # استارت معمولی کاربران عادی
     if user.id == OWNER_ID:
         await message.reply_text(
             f"سلام، {OWNER_DISPLAY_NAME}!\nاز منو یا دکمه‌های زیر استفاده کنید.",
@@ -305,7 +302,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "راهنمای مالک:\n"
             "• /anon_inbox — صندوق پیام‌های ارسالی برای شما\n"
-            "• /active_chats — گفتگوهای فعال یک ساعت اخیر شما\n"
+            "• /active_chats — گفتگوهای فعال یک ساعت اخیر\n"
             "• /my_link — لینک ناشناس شما\n"
             "• /my_musics — مدیریت موزیک‌ها"
         )
@@ -320,17 +317,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------
-# صندوق و گفتگوهای فعال (فقط مالک)
+# صندوق و گفتگوهای فعال (مالک)
 # -------------------------
-def owner_conversations():
-    return [
+async def show_owner_inbox(message):
+    convs = [
         (k, v) for k, v in anon_conversations.items()
         if k.split(":")[0] == str(OWNER_ID)
     ]
-
-
-async def show_owner_inbox(message):
-    convs = owner_conversations()
     if not convs:
         await message.reply_text("📭 صندوق پیام‌ها خالی است.")
         return
@@ -346,8 +339,9 @@ async def show_owner_inbox(message):
 
 async def show_owner_active(message):
     now = time.time()
+    # نمایش تمام گفتگوهای فعال بین تمام کاربران در یک ساعت اخیر
     active = [
-        (k, v) for k, v in owner_conversations()
+        (k, v) for k, v in anon_conversations.items()
         if now - float(v.get("last_ts", 0)) <= ACTIVE_WINDOW_SECONDS
     ]
     active.sort(key=lambda p: float(p[1].get("last_ts", 0)), reverse=True)
@@ -356,38 +350,42 @@ async def show_owner_active(message):
         return
     keyboard = []
     for k, item in active:
+        target_id, sender_id = k.split(":")
         count = item.get("count", 0)
+        label_prefix = "👑 (به شما)" if target_id == str(OWNER_ID) else "👥 (بین کاربران)"
         keyboard.append([InlineKeyboardButton(
-            f"🟢 {item.get('name', 'کاربر')} ({username_text(item.get('username'))}) — {count} پیام",
-            callback_data=f"view_anon_{k.split(':')[1]}",
+            f"{label_prefix} {item.get('name', 'کاربر')} — {count} پیام",
+            callback_data=f"view_any_{target_id}_{sender_id}",
         )])
     await message.reply_text(
-        "🟢 گفتگوهای فعال یک ساعت اخیر:",
+        "🟢 گفتگوهای فعال یک ساعت اخیر (همه کاربران):",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-async def view_conversation(query, sender_id):
-    item = anon_conversations.get(conv_key(OWNER_ID, sender_id))
+async def view_any_conversation(query, target_id, sender_id):
+    key = conv_key(target_id, sender_id)
+    item = anon_conversations.get(key)
     if not item:
         await query.edit_message_text("❌ سابقهٔ این گفتگو پیدا نشد.")
         return
     lines = []
     for entry in item.get("messages", [])[-10:]:
         if isinstance(entry, dict):
-            who = item.get("name", "کاربر") if entry.get("from") == "user" else OWNER_DISPLAY_NAME
+            who = item.get("name", "کاربر") if entry.get("from") == "user" else "پاسخ‌دهنده"
             lines.append(f"• {who}: {entry.get('text', '[رسانه]')}")
         else:
             lines.append(f"• {entry}")
     body = "\n".join(lines) or "هنوز پیامی ثبت نشده است."
     text = (
-        f"نام: {item.get('name', 'کاربر')}\n"
-        f"یوزرنیم: {username_text(item.get('username'))}\n"
-        f"شناسه: {sender_id}\n\nپیام‌های اخیر:\n{body}"
+        f"گیرنده: {target_id}\n"
+        f"فرستنده: {sender_id}\n"
+        f"نام فرستنده: {item.get('name', 'کاربر')}\n"
+        f"یوزرنیم: {username_text(item.get('username'))}\n\n"
+        f"پیام‌های ردوبدل شده:\n{body}"
     )
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("✍️ پاسخ به گفتگو", callback_data=f"prep_reply_{sender_id}")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_inbox")],
+        [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="owner_active")],
     ]))
 
 
@@ -437,8 +435,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "owner_active":
         await show_owner_active(query.message)
         return
+    if data.startswith("view_any_"):
+        parts = data.removeprefix("view_any_").split("_")
+        if len(parts) == 2:
+            await view_any_conversation(query, parts[0], parts[1])
+        return
     if data.startswith("view_anon_"):
-        await view_conversation(query, int(data.removeprefix("view_anon_")))
+        sender_id = int(data.removeprefix("view_anon_"))
+        await view_any_conversation(query, str(OWNER_ID), str(sender_id))
         return
     if data.startswith("prep_reply_"):
         reply_target[OWNER_ID] = int(data.removeprefix("prep_reply_"))
@@ -576,7 +580,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=target, from_chat_id=message.chat_id, message_id=message.message_id,
             )
             for k, item in anon_conversations.items():
-                if k.split(":")[0] == str(user.id) and k.split(":")[1] == str(target):
+                if k.split(":")[0] == str(target) and k.split(":")[1] == str(user.id):
                     item.setdefault("messages", []).append({
                         "from": "owner", "text": get_message_description(message), "ts": time.time(),
                     })
