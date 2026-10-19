@@ -1,142 +1,33 @@
 import os
-import logging
-import asyncio
 import uuid
 from aiohttp import web
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# شناسه انحصاری مالک ربات (عباس)
+OWNER_ID = 6073046430
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-EXPIRATION_SECONDS = 24 * 60 * 60
+# مدت زمان انقضای فایل‌ها (24 ساعت به ثانیه)
+EXPIRATION_SECONDS = 86400
 
-# حافظه موقت برای ذخیره اطلاعات فایل‌ها (در دیکشنری رم)
+# حافظه موقت برای ذخیره مشخصات موزیک‌ها
+# ساختار: {music_id: {"file_id": ..., "file_type": ..., "caption": ..., "owner_msg_id": ..., "reply_msg_id": ...}}
 shared_music = {}
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    # اگر کاربر با لینک اختصاصی وارد شد (مثلاً start=music_123)
-    if args and args[0].startswith("music_"):
-        music_id = args[0]
-        if music_id in shared_music:
-            data = shared_music[music_id]
-            # ارسال فایل به دوستتان
-            sent_msg = await context.bot.copy_message(
-                chat_id=update.effective_chat.id,
-                from_chat_id=data["owner_chat_id"],
-                message_id=data["audio_msg_id"]
-            )
-            reply_msg = await update.message.reply_text(
-                "🎵 این موزیک از طرف دوستتان برای شما ارسال شد و تا ۲۴ ساعت آینده به صورت خودکار حذف خواهد شد."
-            )
-            
-            # زمان‌بندی برای حذف پیام از چت دوستتان
-            job_data = {
-                "chat_id": update.effective_chat.id,
-                "audio_msg_id": sent_msg.message_id,
-                "reply_msg_id": reply_msg.message_id
-            }
-            context.job_queue.run_once(
-                delete_expired_audio,
-                when=EXPIRATION_SECONDS,
-                data=job_data,
-                name=f"del_friend_{music_id}"
-            )
-            return
-        else:
-            await update.message.reply_text("❌ متأسفانه این لینک منقضی شده یا آهنگ پاک شده است.")
-            return
-
-    await update.message.reply_text(
-        "سلام! 🎵\nهر موزیک یا فایلی بفرستی، هم ذخیره می‌شود و هم یک **لینک اشتراک‌گذاری اختصاصی** برای فرستادن به دوستانت دریافت می‌کنی که بعد از ۲۴ ساعت پاک می‌شود."
-    )
-
-
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    chat_id = message.chat_id
-    audio_msg_id = message.message_id
-
-    # ساخت یک شناسهتاک برای موزیک
-    music_id = f"music_{uuid.uuid4().hex[:8]}"
-    
-    # ذخیره مشخصات در حافظه موقت ربات
-    shared_music[music_id] = {
-        "owner_chat_id": chat_id,
-        "audio_msg_id": audio_msg_id
-    }
-
-    bot_username = context.bot.username
-    share_link = f"https://t.me/{bot_username}?start={music_id}"
-
-    reply_msg = await message.reply_text(
-        f"✅ موزیک با موفقیت ثبت شد!\n\n"
-        f"🔗 **لینک اشتراک‌گذاری برای دوستتان:**\n`{share_link}`\n\n"
-        f"این آهنگ و لینک آن تا ۲۴ ساعت آینده فعال هستند.",
-        parse_mode="Markdown"
-    )
-
-    job_data = {
-        "chat_id": chat_id,
-        "audio_msg_id": audio_msg_id,
-        "reply_msg_id": reply_msg.message_id,
-        "music_id": music_id
-    }
-
-    # زمان‌بندی برای حذف کامل موزیک اصلی پس از ۲۴ ساعت
-    context.job_queue.run_once(
-        delete_expired_audio_and_memory,
-        when=EXPIRATION_SECONDS,
-        data=job_data,
-        name=f"del_owner_{music_id}"
-    )
-
-
-async def delete_expired_audio(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    data = job.data
-    try:
-        await context.bot.delete_message(chat_id=data["chat_id"], message_id=data["audio_msg_id"])
-        await context.bot.delete_message(chat_id=data["chat_id"], message_id=data["reply_msg_id"])
-        logger.info("Friend message deleted successfully.")
-    except Exception as e:
-        logger.error(f"Error deleting friend message: {e}")
-
-
-async def delete_expired_audio_and_memory(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    data = job.data
-    music_id = data["music_id"]
-    
-    # حذف از حافظه موقت
-    if music_id in shared_music:
-        del shared_music[music_id]
-
-    try:
-        await context.bot.delete_message(chat_id=data["chat_id"], message_id=data["audio_msg_id"])
-        await context.bot.delete_message(chat_id=data["chat_id"], message_id=data["reply_msg_id"])
-        logger.info("Owner audio and message deleted successfully.")
-    except Exception as e:
-        logger.error(f"Error deleting owner audio: {e}")
-
-
 async def health_check(request):
+    """وب‌سرور داخلی برای جلوگیری از به خواب رفتن سرور توسط UptimeRobot"""
     return web.Response(text="Bot is running!")
 
 
-async def run_web_server():
+async def start_web_server():
     app = web.Application()
     app.router.add_get("/", health_check)
     runner = web.AppRunner(app)
@@ -146,27 +37,203 @@ async def run_web_server():
     await site.start()
 
 
-async def main_async():
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN is not set!")
+async def delete_expired_message(context: ContextTypes.DEFAULT_TYPE):
+    """حذف پیام پس از پایان 24 ساعت"""
+    data = context.job.data
+    chat_id = data.get("chat_id")
+    message_id = data.get("message_id")
+    music_id = data.get("music_id")
 
-    await run_web_server()
+    # حذف از دیتابیس حافظه در صورت اتمام 24 ساعت
+    if music_id and music_id in shared_music:
+        del shared_music[music_id]
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    audio_filter = filters.AUDIO | filters.VOICE | (filters.Document.Category("audio/"))
-    app.add_handler(MessageHandler(audio_filter, handle_audio))
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
 
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
 
-    while True:
-        await asyncio.sleep(3600)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    args = context.args
+
+    # اگر کاربر از طریق لینک اشتراک وارد شده باشد
+    if args and len(args) > 0 and args[0].startswith("music_"):
+        music_id = args[0]
+        if music_id in shared_music:
+            music_data = shared_music[music_id]
+            file_id = music_data["file_id"]
+            file_type = music_data["file_type"]
+            caption = music_data.get("caption") or "🎵 این موزیک تا پایان مهلت ۲۴ ساعته در دسترس است و سپس حذف خواهد شد."
+
+            if file_type == "audio":
+                sent_msg = await context.bot.send_audio(
+                    chat_id=user.id,
+                    audio=file_id,
+                    caption=caption
+                )
+            elif file_type == "voice":
+                sent_msg = await context.bot.send_voice(
+                    chat_id=user.id,
+                    voice=file_id,
+                    caption=caption
+                )
+            else:
+                sent_msg = await context.bot.send_document(
+                    chat_id=user.id,
+                    document=file_id,
+                    caption=caption
+                )
+
+            # تنظیم زمان‌سنج برای حذف موزیک از چت دوست پس از 24 ساعت
+            context.job_queue.run_once(
+                delete_expired_message,
+                EXPIRATION_SECONDS,
+                data={"chat_id": user.id, "message_id": sent_msg.message_id},
+            )
+        else:
+            await update.message.reply_text(
+                "❌ متأسفانه این لینک منقضی یا توسط فرستنده حذف شده است."
+            )
+        return
+
+    # پیام /start عادی
+    if user.id == OWNER_ID:
+        await update.message.reply_text(
+            "سلام عباس عزیز! خوش آمدی.\n"
+            "موزیکت را بفرست تا لینک اشتراک ۲۴ ساعته همراه با دکمه ابطال فوری بسازم."
+        )
+    else:
+        await update.message.reply_text(
+            "سلام! برای دریافت فایل باید روی لینکی که فرستنده در اختیارتان قرار داده کلیک کنید."
+        )
+
+
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    # محدودیت انحصاری به مالک
+    if user.id != OWNER_ID:
+        await update.message.reply_text("⛔️ شما اجازه آپلود فایل ندارید. این ربات شخصی است.")
+        return
+
+    message = update.message
+    file_id = None
+    file_type = None
+
+    if message.audio:
+        file_id = message.audio.file_id
+        file_type = "audio"
+    elif message.voice:
+        file_id = message.voice.file_id
+        file_type = "voice"
+    elif message.document and message.document.mime_type and message.document.mime_type.startswith("audio/"):
+        file_id = message.document.file_id
+        file_type = "document"
+
+    if not file_id:
+        await message.reply_text("فرمت پشتیبانی نمی‌شود. لطفاً یک فایل صوتی ارسال کنید.")
+        return
+
+    music_id = f"music_{uuid.uuid4().hex[:8]}"
+    bot_info = await context.bot.get_me()
+    share_link = f"https://t.me/{bot_info.username}?start={music_id}"
+
+    # دکمه شیشه‌ای برای حذف دستی و فوری
+    keyboard = [
+        [InlineKeyboardButton("🗑 حذف فوری و ابطال لینک", callback_data=f"del_{music_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    reply_msg = await message.reply_text(
+        f"✅ فایل صوتی ثبت شد!\n\n"
+        f"🔗 **لینک اختصاصی برای دوستان:**\n`{share_link}`\n\n"
+        f"⏳ مهلت استفاده: **۲۴ ساعت**\n"
+        f"💡 در صورت انصراف، می‌توانید روی دکمه زیر بزنید تا لینک همین حالا باطل شود.",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+    shared_music[music_id] = {
+        "file_id": file_id,
+        "file_type": file_type,
+        "caption": message.caption,
+        "owner_chat_id": message.chat_id,
+        "owner_msg_id": message.message_id,
+        "reply_msg_id": reply_msg.message_id,
+    }
+
+    # انقضای اتوماتیک 24 ساعته
+    context.job_queue.run_once(
+        delete_expired_message,
+        EXPIRATION_SECONDS,
+        data={"chat_id": message.chat_id, "message_id": message.message_id, "music_id": music_id},
+    )
+    context.job_queue.run_once(
+        delete_expired_message,
+        EXPIRATION_SECONDS,
+        data={"chat_id": message.chat_id, "message_id": reply_msg.message_id},
+    )
+
+
+async def delete_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش زدن دکمه شیشه‌ای حذف فوری"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != OWNER_ID:
+        await query.answer("شما اجازه حذف این فایل را ندارید!", show_alert=True)
+        return
+
+    callback_data = query.data
+    if callback_data.startswith("del_"):
+        music_id = callback_data.replace("del_", "")
+
+        if music_id in shared_music:
+            data = shared_music.pop(music_id)
+            
+            # تلاش برای پاک کردن پیام‌های ارسالی موزیک و دکمه در پیوی ادمین
+            try:
+                await context.bot.delete_message(chat_id=data["owner_chat_id"], message_id=data["owner_msg_id"])
+            except Exception:
+                pass
+
+            try:
+                await context.bot.delete_message(chat_id=data["owner_chat_id"], message_id=data["reply_msg_id"])
+            except Exception:
+                pass
+
+            await context.bot.send_message(
+                chat_id=query.from_user.id,
+                text="🗑 فایل با موفقیت حذف و لینک آن برای همه باطل شد."
+            )
+        else:
+            await query.edit_message_text("این لینک قبلاً باطل یا منقضی شده است.")
 
 
 def main():
-    asyncio.run(main_async())
+    token = os.environ.get("BOT_TOKEN")
+    if not token:
+        raise ValueError("BOT_TOKEN پیدا نشد!")
+
+    application = ApplicationBuilder().token(token).build()
+
+    # وب سرور UptimeRobot
+    application.job_queue.run_once(lambda ctx: start_web_server(), 0)
+
+    # مدیریت هندلرها
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(
+        MessageHandler(
+            filters.AUDIO | filters.VOICE | filters.Document.Category("audio/"),
+            handle_audio,
+        )
+    )
+    application.add_handler(CallbackQueryHandler(delete_button_callback))
+
+    print("ربات فعال شد...")
+    application.run_polling()
 
 
 if __name__ == "__main__":
