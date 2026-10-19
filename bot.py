@@ -30,6 +30,7 @@ from telegram.ext import (
 # -------------------------
 OWNER_ID = 6073046430
 OWNER_DISPLAY_NAME = "Ả̸̱̻͕̜͔̗̹͗̐̏̄͜͝͝M̶͋̅͠"
+ANON_LABEL = "🎭 ناشناس"
 DATA_FILE = Path(os.environ.get("DATA_FILE", "bot_data.json"))
 ACTIVE_WINDOW_SECONDS = 3600
 
@@ -39,46 +40,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# داده‌ها
 shared_music = {}
 pending_uploads = {}
-anon_conversations = {}
-users_in_anon_mode = set()
-admin_reply_target = {}
-msg_to_sender_map = {}
-active_dialogs = {}
+anon_conversations = {}          # کلید: "گیرنده:فرستنده"
+anon_mode = {}                   # user_id -> target_id (گیرنده‌ی پیام‌هایش)
+reply_target = {}                # user_id -> user_id (پاسخ به این نفر)
+msg_to_sender_map = {}           # message_id -> (فرستنده، گیرنده)
 
-# وب‌سرور Render
 web_runner = None
 
 
 # -------------------------
-# ذخیره‌سازی محلی
+# ذخیره‌سازی
 # -------------------------
 def load_data():
-    global shared_music, anon_conversations, active_dialogs
-
+    global shared_music, anon_conversations
     if not DATA_FILE.exists():
         return
-
     try:
         data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
         shared_music = data.get("shared_music", {})
         anon_conversations = data.get("anon_conversations", {})
-        active_dialogs = data.get("active_dialogs", {})
     except Exception:
-        logger.exception("خواندن فایل داده ناموفق بود؛ با داده خالی ادامه می‌دهیم.")
+        logger.exception("خواندن فایل داده ناموفق بود.")
 
 
 def save_data():
-    data = {
-        "shared_music": shared_music,
-        "anon_conversations": anon_conversations,
-        "active_dialogs": active_dialogs,
-    }
     try:
         DATA_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
+            json.dumps(
+                {"shared_music": shared_music, "anon_conversations": anon_conversations},
+                ensure_ascii=False, indent=2,
+            ),
             encoding="utf-8",
         )
     except Exception:
@@ -86,7 +79,7 @@ def save_data():
 
 
 # -------------------------
-# وب‌سرور
+# وب‌سرور سلامت (برای Render و UptimeRobot)
 # -------------------------
 async def health_check(request):
     return web.Response(text="Bot is running!")
@@ -94,22 +87,18 @@ async def health_check(request):
 
 async def post_init(application: Application):
     global web_runner
-
-    # راه‌اندازی وب‌سرور در همان حلقهٔ asyncio ربات
     app = web.Application()
     app.router.add_get("/", health_check)
     web_runner = web.AppRunner(app)
     await web_runner.setup()
-
-    port = int(os.environ.get("PORT", "8080"))
-    site = web.TCPSite(web_runner, "0.0.0.0", port)
+    site = web.TCPSite(web_runner, "0.0.0.0", int(os.environ.get("PORT", "8080")))
     await site.start()
-    logger.info("Health server is listening on port %s", port)
+    logger.info("Health server on port %s", os.environ.get("PORT", "8080"))
 
     owner_commands = [
         BotCommand("start", "شروع / منو"),
         BotCommand("anon_inbox", "صندوق پیام ناشناس"),
-        BotCommand("anon_link", "لینک ناشناس من"),
+        BotCommand("my_link", "لینک ناشناس من"),
         BotCommand("active_chats", "گفتگوهای فعال"),
         BotCommand("my_musics", "موزیک‌های من"),
         BotCommand("help", "راهنما"),
@@ -119,19 +108,16 @@ async def post_init(application: Application):
         BotCommand("my_link", "لینک ناشناس من"),
         BotCommand("help", "راهنما"),
     ]
-
     try:
         await application.bot.set_my_commands(public_commands)
         await application.bot.set_my_commands(
-            owner_commands,
-            scope=BotCommandScopeChat(chat_id=OWNER_ID),
+            owner_commands, scope=BotCommandScopeChat(chat_id=OWNER_ID)
         )
         await application.bot.set_chat_menu_button(
-            chat_id=OWNER_ID,
-            menu_button=MenuButtonCommands(),
+            chat_id=OWNER_ID, menu_button=MenuButtonCommands()
         )
     except Exception:
-        logger.exception("تنظیم منوی فرمان‌های تلگرام ناموفق بود.")
+        logger.exception("تنظیم منو ناموفق بود.")
 
 
 async def post_shutdown(application: Application):
@@ -142,26 +128,8 @@ async def post_shutdown(application: Application):
 
 
 # -------------------------
-# صفحهٔ شروع و دکمه‌ها
+# ابزارها
 # -------------------------
-def public_start_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎭 ارسال پیام ناشناس", callback_data="go_anon_owner")],
-        [
-            InlineKeyboardButton("🔗 دریافت لینک ناشناس من", callback_data="btn_get_link"),
-            InlineKeyboardButton("📩 پیام‌های من", callback_data="btn_my_messages"),
-        ],
-    ])
-
-
-def owner_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 صندوق پیام‌های ناشناس", callback_data="owner_inbox")],
-        [InlineKeyboardButton("🟢 گفتگوهای فعال", callback_data="owner_active")],
-        [InlineKeyboardButton("🔗 لینک ناشناس من", callback_data="btn_get_link")],
-    ])
-
-
 def username_text(username):
     return f"@{username}" if username else "ندارد"
 
@@ -182,31 +150,82 @@ def format_remaining(seconds):
     return f"{secs} ثانیه"
 
 
+def public_start_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎭 ارسال پیام ناشناس", callback_data="go_anon_owner")],
+        [
+            InlineKeyboardButton("🔗 دریافت لینک ناشناس من", callback_data="btn_get_link"),
+            InlineKeyboardButton("📩 پیام‌های من", callback_data="btn_my_messages"),
+        ],
+    ])
+
+
+def owner_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 صندوق پیام‌های ناشناس", callback_data="owner_inbox")],
+        [InlineKeyboardButton("🟢 گفتگوهای فعال", callback_data="owner_active")],
+        [InlineKeyboardButton("🔗 لینک ناشناس من", callback_data="btn_get_link")],
+    ])
+
+
+def conv_key(target_id, sender_id):
+    return f"{target_id}:{sender_id}"
+
+
+async def send_my_link(update_or_query, context, user_id):
+    bot = await context.bot.get_me()
+    link = f"https://t.me/{bot.username}?start=anon_{user_id}"
+    text = (
+        f"🔗 لینک ناشناس شخصی شما:\n{link}\n\n"
+        "هر کس این لینک را باز کند می‌تواند بدون لو دادن هویت برای شما پیام بفرستد،\n"
+        "و شما می‌توانید به او پاسخ دهید."
+    )
+    if hasattr(update_or_query, "message") and getattr(update_or_query.message, "reply_text", None):
+        await update_or_query.message.reply_text(text)
+    else:
+        await update_or_query.reply_text(text)
+
+
+# -------------------------
+# /start
+# -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
     if not user or not message:
         return
 
-    # /start لغو حالت ارسال یا پاسخ قبلی
-    users_in_anon_mode.discard(user.id)
-    if user.id == OWNER_ID:
-        admin_reply_target.pop(OWNER_ID, None)
+    # خروج از حالت‌های قبلی
+    anon_mode.pop(user.id, None)
+    reply_target.pop(user.id, None)
 
     args = context.args
 
-    # لینک ارسال پیام ناشناس به مالک
-    if args and args[0] == "anon_chat":
-        if user.id == OWNER_ID:
-            await message.reply_text("این لینک متعلق به خود شماست؛ آن را با دیگران به اشتراک بگذارید.")
+    # لینک ناشناس شخصی: anon_<شناسه گیرنده>
+    if args and (args[0].startswith("anon_") or args[0] == "anon_chat"):
+        raw = args[0].replace("anon_", "")
+        target_id = OWNER_ID if raw == "chat" else (int(raw) if raw.isdigit() else None)
+
+        if not target_id:
+            await message.reply_text("❌ لینک نامعتبر است.")
+            return
+        if target_id == user.id:
+            await message.reply_text("😅 این لینک خودِ شماست! آن را برای دوستانت بفرست، نه خودت.")
             return
 
-        users_in_anon_mode.add(user.id)
+        try:
+            target_user = await context.bot.get_chat(target_id)
+            target_name = target_user.full_name
+        except Exception:
+            await message.reply_text("❌ صاحب این لینک در دسترس نیست.")
+            return
+
+        anon_mode[user.id] = target_id
+        display = OWNER_DISPLAY_NAME if target_id == OWNER_ID else ANON_LABEL
         await message.reply_text(
-            f"شما در حال ارسال پیام ناشناس به {OWNER_DISPLAY_NAME} هستید! 🎭\n\n"
-            "پیام متنی یا فایل خود را همین‌جا بفرستید.\n"
-            "برای لغو، /start را بزنید.",
-            reply_markup=public_start_keyboard(),
+            f"شما در حال ارسال پیام ناشناس به {display} هستید! 🎭\n\n"
+            "پیام متنی یا فایل خود را همین‌جا بفرستید؛ هویت شما پنهان می‌ماند.\n"
+            "برای لغو، /start را بزنید."
         )
         return
 
@@ -214,18 +233,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args and args[0].startswith("music_"):
         music_id = args[0]
         item = shared_music.get(music_id)
-
         if not item:
             await message.reply_text("❌ این لینک منقضی، حذف‌شده یا نامعتبر است.")
             return
-
         expires_at = item.get("expires_at")
         if expires_at and time.time() >= expires_at:
             shared_music.pop(music_id, None)
             save_data()
             await message.reply_text("❌ اعتبار این لینک تمام شده است.")
             return
-
         try:
             sent = await send_music_to_user(context, user.id, item)
             if expires_at:
@@ -236,19 +252,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
         except Exception:
             logger.exception("ارسال موزیک ناموفق بود.")
-            await message.reply_text("❌ ارسال فایل ممکن نشد. لطفاً کمی بعد دوباره تلاش کنید.")
+            await message.reply_text("❌ ارسال فایل ممکن نشد؛ کمی بعد دوباره تلاش کنید.")
         return
 
+    # استارت معمولی: هیچ حالتی فعال نمی‌شود
     if user.id == OWNER_ID:
         await message.reply_text(
-            f"سلام، {OWNER_DISPLAY_NAME}.\n\n"
-            "از منو یا دکمه‌های زیر برای مدیریت پیام‌ها و موزیک‌ها استفاده کنید.",
+            f"سلام، {OWNER_DISPLAY_NAME}!\nاز منو یا دکمه‌های زیر استفاده کنید.",
             reply_markup=owner_keyboard(),
         )
     else:
         await message.reply_text(
             "سلام! به ربات پیام ناشناس و موزیک خوش آمدید.\n\n"
-            "از دکمه‌های زیر استفاده کنید:",
+            "• «ارسال پیام ناشناس» برای پیام به معرفی‌کنندهٔ ربات\n"
+            "• «دریافت لینک ناشناس من» برای گرفتن لینک اختصاصی خودتان",
             reply_markup=public_start_keyboard(),
         )
 
@@ -257,7 +274,6 @@ async def send_music_to_user(context, user_id, item):
     file_type = item.get("file_type")
     file_id = item["file_id"]
     caption = item.get("caption") or f"🎵 {item.get('name', 'موزیک')}"
-
     if file_type == "audio":
         return await context.bot.send_audio(user_id, audio=file_id, caption=caption)
     if file_type == "voice":
@@ -265,133 +281,102 @@ async def send_music_to_user(context, user_id, item):
     return await context.bot.send_document(user_id, document=file_id, caption=caption)
 
 
-async def send_anon_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    bot = await context.bot.get_me()
-    link = f"https://t.me/{bot.username}?start=anon_chat"
-    await update.effective_message.reply_text(
-        f"🔗 لینک ارسال پیام ناشناس:\n{link}\n\n"
-        "هرکسی این لینک را باز کند می‌تواند برای مالک ربات پیام بفرستد."
-    )
-
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id == OWNER_ID:
         text = (
             "راهنمای مالک:\n"
-            "• /anon_inbox — صندوق پیام‌ها\n"
-            "• /active_chats — گفتگوهای فعال در یک ساعت اخیر\n"
-            "• /anon_link — لینک پیام ناشناس\n"
+            "• /anon_inbox — صندوق پیام‌هایی که برای شما فرستاده شده\n"
+            "• /active_chats — گفتگوهای فعال یک ساعت اخیر\n"
+            "• /my_link — لینک ناشناس شما\n"
             "• /my_musics — مدیریت موزیک‌ها\n"
-            "• برای پاسخ، از دکمهٔ پاسخ در پیام دریافتی استفاده کنید."
+            "• پاسخ: روی پیام دریافتی Reply بزنید یا از دکمهٔ «✍️ پاسخ»."
         )
     else:
         text = (
-            "راهنمای استفاده:\n"
-            "• «ارسال پیام ناشناس» را بزنید و پیام‌تان را بفرستید.\n"
-            "• «دریافت لینک ناشناس من» لینک ارسال پیام به مالک ربات را می‌دهد.\n"
-            "• برای خروج از حالت ارسال پیام، /start را بزنید."
+            "راهنما:\n"
+            "• /my_link — گرفتن لینک ناشناس شخصی شما (برای دوستانتان)\n"
+            "• با لینک دیگران می‌توانید به آن‌ها پیام ناشناس بدهید\n"
+            "• برای پاسخ به پیام دریافتی، دکمهٔ «✍️ پاسخ» را بزنید\n"
+            "• برای خروج از حالت ناشناس، /start را بزنید."
         )
     await update.effective_message.reply_text(text)
 
 
 # -------------------------
-# صندوق و گفتگوهای فعال مالک
+# صندوق و گفتگوهای فعال (فقط مالک)
 # -------------------------
-async def anon_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-
-    if not anon_conversations:
-        await update.effective_message.reply_text("📭 صندوق پیام‌ها خالی است.")
-        return
-
-    keyboard = []
-    for uid, item in anon_conversations.items():
-        name = item.get("name", "کاربر")
-        username = username_text(item.get("username"))
-        count = len(item.get("messages", []))
-        keyboard.append([
-            InlineKeyboardButton(
-                f"👤 {name} ({username}) — {count} پیام",
-                callback_data=f"view_anon_{uid}",
-            )
-        ])
-
-    await update.effective_message.reply_text(
-        "📥 صندوق پیام‌های ناشناس:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-async def active_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-
-    active = [
-        (uid, item)
-        for uid, item in active_dialogs.items()
-        if time.time() - float(item.get("last_ts", 0)) <= ACTIVE_WINDOW_SECONDS
+def owner_conversations():
+    return [
+        (k, v) for k, v in anon_conversations.items()
+        if k.split(":")[0] == str(OWNER_ID)
     ]
-    active.sort(key=lambda pair: float(pair[1].get("last_ts", 0)), reverse=True)
 
-    if not active:
-        await update.effective_message.reply_text(
-            "🟢 در یک ساعت اخیر گفتگوی فعالی ثبت نشده است."
-        )
+
+async def show_owner_inbox(message):
+    convs = owner_conversations()
+    if not convs:
+        await message.reply_text("📭 صندوق پیام‌ها خالی است.")
         return
-
     keyboard = []
-    for uid, item in active:
-        name = item.get("name", "کاربر")
-        username = username_text(item.get("username"))
+    for k, item in convs:
         count = item.get("count", 0)
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🟢 {name} ({username}) — {count} پیام",
-                callback_data=f"view_anon_{uid}",
-            )
-        ])
+        keyboard.append([InlineKeyboardButton(
+            f"👤 {item.get('name', 'کاربر')} ({username_text(item.get('username'))}) — {count} پیام",
+            callback_data=f"view_anon_{k.split(':')[1]}",
+        )])
+    await message.reply_text("📥 صندوق پیام‌های ناشناس:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    await update.effective_message.reply_text(
-        "🟢 گفتگوهای فعال در یک ساعت اخیر:\n"
-        "برای دیدن پیام‌های ثبت‌شده روی نام کاربر بزنید.",
+
+async def show_owner_active(message):
+    now = time.time()
+    active = [
+        (k, v) for k, v in owner_conversations()
+        if now - float(v.get("last_ts", 0)) <= ACTIVE_WINDOW_SECONDS
+    ]
+    active.sort(key=lambda p: float(p[1].get("last_ts", 0)), reverse=True)
+    if not active:
+        await message.reply_text("🟢 در یک ساعت اخیر گفتگوی فعالی ثبت نشده است.")
+        return
+    keyboard = []
+    for k, item in active:
+        count = item.get("count", 0)
+        keyboard.append([InlineKeyboardButton(
+            f"🟢 {item.get('name', 'کاربر')} ({username_text(item.get('username'))}) — {count} پیام",
+            callback_data=f"view_anon_{k.split(':')[1]}",
+        )])
+    await message.reply_text(
+        "🟢 گفتگوهای فعال یک ساعت اخیر:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-async def view_conversation(query, target_id):
-    item = anon_conversations.get(target_id)
+async def view_conversation(query, sender_id):
+    item = anon_conversations.get(conv_key(OWNER_ID, sender_id))
     if not item:
         await query.edit_message_text("❌ سابقهٔ این گفتگو پیدا نشد.")
         return
-
-    messages = item.get("messages", [])[-10:]
     lines = []
-    for entry in messages:
+    for entry in item.get("messages", [])[-10:]:
         if isinstance(entry, dict):
-            direction = "کاربر" if entry.get("from") == "user" else OWNER_DISPLAY_NAME
-            lines.append(f"• {direction}: {entry.get('text', '[پیام چندرسانه‌ای]')}")
+            who = item.get("name", "کاربر") if entry.get("from") == "user" else OWNER_DISPLAY_NAME
+            lines.append(f"• {who}: {entry.get('text', '[رسانه]')}")
         else:
             lines.append(f"• {entry}")
-
-    body = "\n".join(lines) if lines else "هنوز پیامی ثبت نشده است."
+    body = "\n".join(lines) or "هنوز پیامی ثبت نشده است."
     text = (
         f"نام: {item.get('name', 'کاربر')}\n"
         f"یوزرنیم: {username_text(item.get('username'))}\n"
-        f"شناسهٔ تلگرام: {target_id}\n\n"
-        f"پیام‌های اخیر:\n{body}"
+        f"شناسه: {sender_id}\n\nپیام‌های اخیر:\n{body}"
     )
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✍️ پاسخ به گفتگو", callback_data=f"prep_reply_{target_id}")],
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("✍️ پاسخ به گفتگو", callback_data=f"prep_reply_{sender_id}")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_inbox")],
-    ])
-    await query.edit_message_text(text, reply_markup=keyboard)
+    ]))
 
 
 # -------------------------
-# دکمه‌های تعاملی
+# دکمه‌ها
 # -------------------------
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -401,129 +386,76 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "go_anon_owner":
         if user.id == OWNER_ID:
-            await query.message.reply_text("برای تست ارسال پیام ناشناس از یک حساب دیگر استفاده کنید.")
+            await query.message.reply_text("این گزینه برای تست از حساب دیگر استفاده می‌شود.")
             return
-        users_in_anon_mode.add(user.id)
+        anon_mode[user.id] = OWNER_ID
         await query.message.reply_text(
             f"شما در حال ارسال پیام ناشناس به {OWNER_DISPLAY_NAME} هستید. 🎭\n"
-            "پیام متنی یا فایل خود را بفرستید.\n"
-            "برای لغو، /start را بزنید."
+            "پیام خود را بفرستید.\nبرای لغو، /start را بزنید."
         )
         return
 
     if data == "btn_get_link":
-        bot = await context.bot.get_me()
-        link = f"https://t.me/{bot.username}?start=anon_chat"
-        await query.message.reply_text(f"🔗 لینک ارسال پیام ناشناس:\n{link}")
+        await send_my_link(query, context, user.id)
         return
 
     if data == "btn_my_messages":
-        if user.id == OWNER_ID:
-            await query.message.reply_text("پیام‌های دریافتی را از «صندوق پیام‌های ناشناس» ببینید.")
+        key = conv_key(user.id, user.id)
+        mine = [
+            (k, v) for k, v in anon_conversations.items()
+            if k.split(":")[0] == str(user.id)
+        ]
+        if user.id == OWNER_ID or not mine:
+            await query.message.reply_text("📩 پیامی برای نمایش پیدا نشد.")
         else:
-            item = anon_conversations.get(str(user.id)) or anon_conversations.get(user.id)
-            if not item or not item.get("messages"):
-                await query.message.reply_text("پیامی برای نمایش پیدا نشد.")
-            else:
-                entries = item["messages"][-5:]
-                lines = [
-                    f"• {m.get('text', '[پیام چندرسانه‌ای]') if isinstance(m, dict) else m}"
-                    for m in entries
-                ]
-                await query.message.reply_text("📩 پیام‌های ثبت‌شدهٔ شما:\n" + "\n".join(lines))
+            lines = []
+            for k, item in mine:
+                for m in item.get("messages", [])[-5:]:
+                    if isinstance(m, dict):
+                        who = item.get("name", "کاربر") if m.get("from") == "user" else ANON_LABEL
+                        lines.append(f"• {who}: {m.get('text', '[رسانه]')}")
+            await query.message.reply_text("📩 پیام‌های شما:\n" + "\n".join(lines))
         return
 
     if user.id != OWNER_ID:
+        # پاسخ کاربران عادی به پیام دریافتی
+        if data.startswith("prep_reply_"):
+            reply_target[user.id] = int(data.removeprefix("prep_reply_"))
+            await query.message.reply_text(
+                "✍️ پاسخ خود را بفرستید (متنی یا فایل). گیرنده آن را ناشناس دریافت می‌کند.\n"
+                "برای لغو، /start را بزنید."
+            )
         return
 
+    # --- مالک ---
     if data == "owner_inbox":
-        await anon_inbox_from_query(query)
+        await show_owner_inbox(query.message)
         return
-
     if data == "owner_active":
-        await active_chats_from_query(query)
+        await show_owner_active(query.message)
         return
-
     if data.startswith("view_anon_"):
-        try:
-            target_id = int(data.removeprefix("view_anon_"))
-        except ValueError:
-            await query.edit_message_text("شناسهٔ کاربر نامعتبر است.")
-            return
-        await view_conversation(query, target_id)
+        await view_conversation(query, int(data.removeprefix("view_anon_")))
         return
-
     if data.startswith("prep_reply_"):
-        try:
-            target_id = int(data.removeprefix("prep_reply_"))
-        except ValueError:
-            await query.message.reply_text("شناسهٔ کاربر نامعتبر است.")
-            return
-        admin_reply_target[OWNER_ID] = target_id
+        reply_target[OWNER_ID] = int(data.removeprefix("prep_reply_"))
         await query.message.reply_text(
-            "✍️ پاسخ خود را به‌صورت پیام متنی یا فایل بفرستید.\n"
-            "برای لغو، /start را بزنید."
+            "✍️ پاسخ خود را بفرستید.\nبرای لغو، /start را بزنید."
         )
         return
-
     if data == "back_to_inbox":
-        await anon_inbox_from_query(query)
+        await show_owner_inbox(query.message)
         return
-
     if data.startswith("duration_"):
         await save_music_duration(query, context)
         return
-
     if data.startswith("delete_music_"):
         await delete_music(query, context)
         return
 
 
-async def anon_inbox_from_query(query):
-    if not anon_conversations:
-        await query.message.reply_text("📭 صندوق پیام‌ها خالی است.")
-        return
-
-    keyboard = []
-    for uid, item in anon_conversations.items():
-        keyboard.append([
-            InlineKeyboardButton(
-                f"👤 {item.get('name', 'کاربر')} ({username_text(item.get('username'))})",
-                callback_data=f"view_anon_{uid}",
-            )
-        ])
-    await query.message.reply_text(
-        "📥 صندوق پیام‌های ناشناس:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-async def active_chats_from_query(query):
-    active = [
-        (uid, item)
-        for uid, item in anon_conversations.items()
-        if time.time() - float(item.get("last_ts", 0)) <= ACTIVE_WINDOW_SECONDS
-    ]
-    if not active:
-        await query.message.reply_text("🟢 در یک ساعت اخیر گفتگوی فعالی ثبت نشده است.")
-        return
-
-    keyboard = []
-    for uid, item in active:
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🟢 {item.get('name', 'کاربر')} ({username_text(item.get('username'))})",
-                callback_data=f"view_anon_{uid}",
-            )
-        ])
-    await query.message.reply_text(
-        "🟢 گفتگوهای فعال در یک ساعت اخیر:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
 # -------------------------
-# پیام‌های ورودی و پاسخ مالک
+# پیام‌ها
 # -------------------------
 def get_message_description(message):
     if message.text:
@@ -545,20 +477,44 @@ def get_message_description(message):
     return "[پیام چندرسانه‌ای]"
 
 
-def ensure_conversation(user):
-    key = str(user.id)
-    if key not in anon_conversations:
-        anon_conversations[key] = {
-            "name": user.full_name,
-            "username": user.username,
-            "messages": [],
-            "last_ts": time.time(),
-            "count": 0,
-        }
-    item = anon_conversations[key]
-    item["name"] = user.full_name
-    item["username"] = user.username
-    return key, item
+async def deliver_anon_message(context, sender, message, target_id):
+    """ارسال پیام ناشناس از sender به target_id + ثبت در تاریخچه."""
+    key = conv_key(target_id, sender.id)
+    item = anon_conversations.setdefault(key, {
+        "name": sender.full_name,
+        "username": sender.username,
+        "messages": [],
+        "last_ts": time.time(),
+        "count": 0,
+    })
+    item["name"] = sender.full_name
+    item["username"] = sender.username
+    item.setdefault("messages", []).append({
+        "from": "user", "text": get_message_description(message), "ts": time.time(),
+    })
+    item["last_ts"] = time.time()
+    item["count"] = item.get("count", 0) + 1
+    save_data()
+
+    display = OWNER_DISPLAY_NAME if target_id == OWNER_ID else ANON_LABEL
+    header = (
+        f"📩 پیام ناشناس جدید برای {display}\n\n"
+        f"👤 نام فرستنده: {sender.full_name}\n"
+        f"🔗 یوزرنیم: {username_text(sender.username)}\n"
+        f"🆔 شناسه: {sender.id}"
+    )
+    await context.bot.send_message(chat_id=target_id, text=header)
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✍️ پاسخ به این گفتگو", callback_data=f"prep_reply_{sender.id}")
+    ]])
+    copied = await context.bot.copy_message(
+        chat_id=target_id,
+        from_chat_id=message.chat_id,
+        message_id=message.message_id,
+        reply_markup=keyboard,
+    )
+    msg_to_sender_map[copied.message_id] = (sender.id, target_id)
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -567,119 +523,98 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not message:
         return
 
-    # مالک در حال پاسخ دادن
+    # --- مالک ---
     if user.id == OWNER_ID:
-        target_id = admin_reply_target.get(OWNER_ID)
-
+        target = reply_target.get(OWNER_ID)
         if message.reply_to_message:
             mapped = msg_to_sender_map.get(message.reply_to_message.message_id)
-            if mapped:
-                target_id = mapped
+            if mapped and mapped[1] == OWNER_ID:
+                target = mapped[0]
 
-        if target_id:
-            key = str(target_id)
+        if target:
             try:
-                await context.bot.send_message(
-                    chat_id=target_id,
-                    text=f"💬 پیام جدید از طرف {OWNER_DISPLAY_NAME}:",
-                )
+                await context.bot.send_message(chat_id=target, text=f"💬 پیام از {OWNER_DISPLAY_NAME}:")
                 await context.bot.copy_message(
-                    chat_id=target_id,
-                    from_chat_id=message.chat_id,
-                    message_id=message.message_id,
+                    chat_id=target, from_chat_id=message.chat_id, message_id=message.message_id,
                 )
-                item = anon_conversations.get(key)
-                if item:
-                    item.setdefault("messages", []).append({
-                        "from": "owner",
-                        "text": get_message_description(message),
-                        "ts": time.time(),
-                    })
-                    item["last_ts"] = time.time()
-                    item["count"] = item.get("count", 0) + 1
-                    save_data()
-                admin_reply_target.pop(OWNER_ID, None)
+                key = conv_key(target, target)
+                # ثبت پاسخ مالک در همان گفتگو
+                for k, item in anon_conversations.items():
+                    if k.split(":")[1] == str(target):
+                        item.setdefault("messages", []).append({
+                            "from": "owner", "text": get_message_description(message), "ts": time.time(),
+                        })
+                        item["last_ts"] = time.time()
+                        break
+                save_data()
+                reply_target.pop(OWNER_ID, None)
                 await message.reply_text("✅ پاسخ ارسال شد.")
             except Exception:
-                logger.exception("ارسال پاسخ مالک ناموفق بود.")
-                await message.reply_text("❌ پاسخ ارسال نشد؛ ممکن است کاربر ربات را مسدود کرده باشد.")
+                logger.exception("ارسال پاسخ ناموفق بود.")
+                await message.reply_text("❌ ارسال نشد؛ شاید کاربر ربات را مسدود کرده باشد.")
             return
 
-        # فایل صوتی مالک برای ساخت لینک موزیک
+        # فایل صوتی مالک -> ساخت لینک موزیک
         if message.audio or message.voice or (
-            message.document
-            and message.document.mime_type
-            and message.document.mime_type.startswith("audio/")
+            message.document and (message.document.mime_type or "").startswith("audio/")
         ):
             await receive_music(message, context)
         return
 
-    # پیام کاربر بدون فعال‌کردن حالت ناشناس نادیده گرفته می‌شود
-    if user.id not in users_in_anon_mode:
+    # --- پاسخ کاربر عادی ---
+    if user.id in reply_target:
+        target = reply_target.pop(user.id)
+        try:
+            await context.bot.send_message(chat_id=target, text=f"💬 پیام از {ANON_LABEL}:")
+            await context.bot.copy_message(
+                chat_id=target, from_chat_id=message.chat_id, message_id=message.message_id,
+            )
+            for k, item in anon_conversations.items():
+                if k.split(":")[0] == str(target) and k.split(":")[1] == str(user.id):
+                    item.setdefault("messages", []).append({
+                        "from": "owner", "text": get_message_description(message), "ts": time.time(),
+                    })
+                    item["last_ts"] = time.time()
+                    break
+            save_data()
+            await message.reply_text("✅ پاسخ شما ارسال شد.")
+        except Exception:
+            await message.reply_text("❌ ارسال نشد.")
         return
 
-    key, item = ensure_conversation(user)
-    description = get_message_description(message)
-    item.setdefault("messages", []).append({
-        "from": "user",
-        "text": description,
-        "ts": time.time(),
-    })
-    item["last_ts"] = time.time()
-    item["count"] = item.get("count", 0) + 1
-    save_data()
+    # --- پیام ناشناس کاربر ---
+    target_id = anon_mode.get(user.id)
+    if not target_id:
+        return  # کاربر عادی که حالت ناشناس ندارد: نادیده گرفته می‌شود
 
-    header = (
-        "📩 پیام ناشناس جدید\n\n"
-        f"👤 نام فرستنده: {user.full_name}\n"
-        f"🔗 یوزرنیم: {username_text(user.username)}\n"
-        f"🆔 شناسهٔ تلگرام: {user.id}"
-    )
-    await context.bot.send_message(chat_id=OWNER_ID, text=header)
-
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✍️ پاسخ به این گفتگو", callback_data=f"prep_reply_{user.id}")
-    ]])
-    copied = await context.bot.copy_message(
-        chat_id=OWNER_ID,
-        from_chat_id=message.chat_id,
-        message_id=message.message_id,
-        reply_markup=keyboard,
-    )
-    msg_to_sender_map[copied.message_id] = user.id
-
-    await message.reply_text("✅ پیام شما ارسال شد. می‌توانید پیام دیگری هم بفرستید.")
+    try:
+        await deliver_anon_message(context, user, message, target_id)
+        await message.reply_text("✅ پیام شما ناشناس ارسال شد. می‌توانید پیام بعدی هم بفرستید.")
+    except Exception:
+        logger.exception("ارسال پیام ناشناس ناموفق بود.")
+        await message.reply_text("❌ ارسال نشد؛ کمی بعد دوباره تلاش کنید.")
 
 
 # -------------------------
-# موزیک
+# موزیک (فقط مالک)
 # -------------------------
 async def receive_music(message, context):
     if message.audio:
-        file_id = message.audio.file_id
-        file_type = "audio"
+        file_id, file_type = message.audio.file_id, "audio"
         name = message.audio.title or message.audio.file_name or "فایل صوتی"
     elif message.voice:
-        file_id = message.voice.file_id
-        file_type = "voice"
+        file_id, file_type = message.voice.file_id, "voice"
         name = "پیام صوتی"
-    elif message.document and message.document.mime_type and message.document.mime_type.startswith("audio/"):
-        file_id = message.document.file_id
-        file_type = "document"
-        name = message.document.file_name or "فایل صوتی"
     else:
-        return
+        file_id, file_type = message.document.file_id, "document"
+        name = message.document.file_name or "فایل صوتی"
 
     temp_id = uuid.uuid4().hex[:8]
     pending_uploads[temp_id] = {
-        "file_id": file_id,
-        "file_type": file_type,
-        "name": name,
+        "file_id": file_id, "file_type": file_type, "name": name,
         "caption": message.caption,
-        "owner_chat_id": message.chat_id,
-        "owner_message_id": message.message_id,
+        "owner_chat_id": message.chat_id, "owner_message_id": message.message_id,
     }
-
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("۱ ساعت", callback_data=f"duration_{temp_id}_3600"),
@@ -703,49 +638,33 @@ async def receive_music(message, context):
 async def save_music_duration(query, context):
     if query.from_user.id != OWNER_ID:
         return
-
     try:
         _, temp_id, seconds_text = query.data.split("_")
         seconds = int(seconds_text)
     except (ValueError, AttributeError):
         await query.message.reply_text("درخواست نامعتبر است.")
         return
-
     info = pending_uploads.pop(temp_id, None)
     if not info:
-        await query.message.reply_text("⚠️ اطلاعات این فایل پیدا نشد؛ لطفاً دوباره فایل را بفرستید.")
+        await query.message.reply_text("⚠️ اطلاعات فایل پیدا نشد؛ دوباره فایل را بفرستید.")
         return
 
     music_id = f"music_{uuid.uuid4().hex[:10]}"
     expires_at = time.time() + seconds if seconds else None
-    shared_music[music_id] = {
-        **info,
-        "created_at": time.time(),
-        "duration_sec": seconds or None,
-        "expires_at": expires_at,
-    }
+    shared_music[music_id] = {**info, "created_at": time.time(), "expires_at": expires_at}
     save_data()
 
     bot = await context.bot.get_me()
     link = f"https://t.me/{bot.username}?start={music_id}"
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🗑 حذف و ابطال لینک", callback_data=f"delete_music_{music_id}")
-    ]])
-
     await query.message.reply_text(
-        f"✅ لینک ساخته شد\n"
-        f"🎵 نام: {info['name']}\n"
-        f"⏳ اعتبار: {format_remaining(seconds or None)}\n"
-        f"🔗 {link}",
-        reply_markup=keyboard,
+        f"✅ لینک ساخته شد\n🎵 نام: {info['name']}\n"
+        f"⏳ اعتبار: {format_remaining(seconds or None)}\n🔗 {link}",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🗑 حذف و ابطال لینک", callback_data=f"delete_music_{music_id}")
+        ]]),
     )
-
     if seconds:
-        context.job_queue.run_once(
-            expire_music_job,
-            seconds,
-            data={"music_id": music_id},
-        )
+        context.job_queue.run_once(expire_music_job, seconds, data={"music_id": music_id})
 
 
 async def expire_music_job(context: ContextTypes.DEFAULT_TYPE):
@@ -753,14 +672,12 @@ async def expire_music_job(context: ContextTypes.DEFAULT_TYPE):
     item = shared_music.get(music_id)
     if not item:
         return
-
     if item.get("expires_at") and time.time() >= item["expires_at"]:
         shared_music.pop(music_id, None)
         save_data()
         try:
             await context.bot.delete_message(
-                chat_id=item["owner_chat_id"],
-                message_id=item["owner_message_id"],
+                chat_id=item["owner_chat_id"], message_id=item["owner_message_id"],
             )
         except Exception:
             pass
@@ -769,10 +686,7 @@ async def expire_music_job(context: ContextTypes.DEFAULT_TYPE):
 async def delete_message_job(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
     try:
-        await context.bot.delete_message(
-            chat_id=data["chat_id"],
-            message_id=data["message_id"],
-        )
+        await context.bot.delete_message(chat_id=data["chat_id"], message_id=data["message_id"])
     except Exception:
         pass
 
@@ -780,28 +694,24 @@ async def delete_message_job(context: ContextTypes.DEFAULT_TYPE):
 async def delete_music(query, context):
     if query.from_user.id != OWNER_ID:
         return
-
     music_id = query.data.removeprefix("delete_music_")
     item = shared_music.pop(music_id, None)
     if not item:
-        await query.edit_message_text("این لینک قبلاً حذف یا باطل شده است.")
+        await query.edit_message_text("این لینک قبلاً حذف شده است.")
         return
-
     save_data()
     try:
         await context.bot.delete_message(
-            chat_id=item["owner_chat_id"],
-            message_id=item["owner_message_id"],
+            chat_id=item["owner_chat_id"], message_id=item["owner_message_id"],
         )
     except Exception:
         pass
-    await query.edit_message_text("🗑 موزیک حذف شد و لینک آن باطل گردید.")
+    await query.edit_message_text("🗑 موزیک حذف و لینک آن باطل شد.")
 
 
 async def my_musics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
-
     now = time.time()
     active = []
     for music_id, item in list(shared_music.items()):
@@ -810,25 +720,20 @@ async def my_musics(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shared_music.pop(music_id, None)
             continue
         active.append((music_id, item))
-
     save_data()
     if not active:
         await update.effective_message.reply_text("📭 موزیک فعالی وجود ندارد.")
         return
-
     bot = await context.bot.get_me()
     for music_id, item in active:
         expires_at = item.get("expires_at")
         remaining = format_remaining(expires_at - now) if expires_at else "♾ همیشگی"
         link = f"https://t.me/{bot.username}?start={music_id}"
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🗑 حذف و ابطال", callback_data=f"delete_music_{music_id}")
-        ]])
         await update.effective_message.reply_text(
-            f"🎵 {item.get('name', 'موزیک')}\n"
-            f"⏳ زمان باقی‌مانده: {remaining}\n"
-            f"🔗 {link}",
-            reply_markup=keyboard,
+            f"🎵 {item.get('name', 'موزیک')}\n⏳ باقی‌مانده: {remaining}\n🔗 {link}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗑 حذف و ابطال", callback_data=f"delete_music_{music_id}")
+            ]]),
         )
 
 
@@ -837,10 +742,9 @@ async def my_musics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 def main():
     load_data()
-
     token = os.environ.get("BOT_TOKEN")
     if not token:
-        raise RuntimeError("متغیر محیطی BOT_TOKEN در Render تنظیم نشده است.")
+        raise RuntimeError("متغیر محیطی BOT_TOKEN تنظیم نشده است.")
 
     application = (
         ApplicationBuilder()
@@ -850,25 +754,15 @@ def main():
         .build()
     )
 
-    # فرمان‌ها
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("anon_link", send_anon_link))
-    application.add_handler(CommandHandler("my_link", send_anon_link))
-    application.add_handler(CommandHandler("anon_inbox", anon_inbox))
-    application.add_handler(CommandHandler("active_chats", active_chats))
+    application.add_handler(CommandHandler("my_link", lambda u, c: send_my_link(u.effective_message, c, u.effective_user.id)))
+    application.add_handler(CommandHandler("anon_link", lambda u, c: send_my_link(u.effective_message, c, u.effective_user.id)))
+    application.add_handler(CommandHandler("anon_inbox", lambda u, c: show_owner_inbox(u.effective_message) if u.effective_user.id == OWNER_ID else None))
+    application.add_handler(CommandHandler("active_chats", lambda u, c: show_owner_active(u.effective_message) if u.effective_user.id == OWNER_ID else None))
     application.add_handler(CommandHandler("my_musics", my_musics))
-
-    # callback ها
     application.add_handler(CallbackQueryHandler(button_handler))
-
-    # پیام‌ها: یک handler عمومی که هم متن و هم رسانه را می‌گیرد
-    application.add_handler(
-        MessageHandler(
-            filters.ALL & ~filters.COMMAND,
-            message_handler,
-        )
-    )
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_handler))
 
     logger.info("Starting bot polling.")
     application.run_polling(drop_pending_updates=True)
