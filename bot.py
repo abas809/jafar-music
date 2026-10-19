@@ -5,6 +5,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from aiohttp import web
 from telegram import (
@@ -152,7 +153,6 @@ def format_remaining(seconds):
 
 def public_start_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎭 ارسال پیام ناشناس", callback_data="go_anon_owner")],
         [
             InlineKeyboardButton("🔗 دریافت لینک ناشناس من", callback_data="btn_get_link"),
             InlineKeyboardButton("📩 پیام‌های من", callback_data="btn_my_messages"),
@@ -175,15 +175,36 @@ def conv_key(target_id, sender_id):
 async def send_my_link(update_or_query, context, user_id):
     bot = await context.bot.get_me()
     link = f"https://t.me/{bot.username}?start=anon_{user_id}"
+    
     text = (
-        f"🔗 لینک ناشناس شخصی شما:\n{link}\n\n"
-        "هر کس این لینک را باز کند می‌تواند بدون لو دادن هویت برای شما پیام بفرستد،\n"
-        "و شما می‌توانید به او پاسخ دهید."
+        "🔗 لینک ناشناس شخصی شما:\n\n"
+        f"`{link}`\n\n"
+        "برای فرستادن سریع لینک به دوستانتان، روی دکمهٔ «اشتراک‌گذاری لینک» بزنید."
     )
+
+    share_url = (
+        "https://t.me/share/url"
+        f"?url={quote(link, safe='')}"
+        f"&text={quote('از طریق این لینک به من پیام ناشناس بفرستید:', safe='')}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "📤 اشتراک‌گذاری لینک",
+                url=share_url,
+            )
+        ]
+    ])
+
     if hasattr(update_or_query, "message") and getattr(update_or_query.message, "reply_text", None):
-        await update_or_query.message.reply_text(text)
+        await update_or_query.message.reply_text(
+            text, parse_mode="Markdown", reply_markup=keyboard, disable_web_page_preview=True
+        )
     else:
-        await update_or_query.reply_text(text)
+        await update_or_query.reply_text(
+            text, parse_mode="Markdown", reply_markup=keyboard, disable_web_page_preview=True
+        )
 
 
 # -------------------------
@@ -195,7 +216,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not message:
         return
 
-    # خروج از حالت‌های قبلی
     anon_mode.pop(user.id, None)
     reply_target.pop(user.id, None)
 
@@ -210,7 +230,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("❌ لینک نامعتبر است.")
             return
         if target_id == user.id:
-            await message.reply_text("😅 این لینک خودِ شماست! آن را برای دوستانت بفرست، نه خودت.")
+            await message.reply_text("😅 این لینک خودِ شماست! آن را برای دیگران بفرستید.")
             return
 
         try:
@@ -221,10 +241,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         anon_mode[user.id] = target_id
-        display = OWNER_DISPLAY_NAME if target_id == OWNER_ID else ANON_LABEL
         await message.reply_text(
-            f"شما در حال ارسال پیام ناشناس به {display} هستید! 🎭\n\n"
-            "پیام متنی یا فایل خود را همین‌جا بفرستید؛ هویت شما پنهان می‌ماند.\n"
+            "شما در حال ارسال پیام ناشناس هستید! 🎭\n\n"
+            "پیام متنی یا فایل خود را همین‌جا بفرستید؛ هویت شما کاملاً پنهان می‌ماند.\n"
             "برای لغو، /start را بزنید."
         )
         return
@@ -255,7 +274,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("❌ ارسال فایل ممکن نشد؛ کمی بعد دوباره تلاش کنید.")
         return
 
-    # استارت معمولی: هیچ حالتی فعال نمی‌شود
+    # استارت معمولی کاربران عادی
     if user.id == OWNER_ID:
         await message.reply_text(
             f"سلام، {OWNER_DISPLAY_NAME}!\nاز منو یا دکمه‌های زیر استفاده کنید.",
@@ -263,9 +282,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await message.reply_text(
-            "سلام! به ربات پیام ناشناس و موزیک خوش آمدید.\n\n"
-            "• «ارسال پیام ناشناس» برای پیام به معرفی‌کنندهٔ ربات\n"
-            "• «دریافت لینک ناشناس من» برای گرفتن لینک اختصاصی خودتان",
+            "سلام! به ربات پیام ناشناس خوش آمدید.\n\n"
+            "• از دکمهٔ **«دریافت لینک ناشناس من»** برای ساخت لینک اختصاصی خودتان استفاده کنید و آن را به دوستانتان بدهید.",
             reply_markup=public_start_keyboard(),
         )
 
@@ -286,19 +304,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id == OWNER_ID:
         text = (
             "راهنمای مالک:\n"
-            "• /anon_inbox — صندوق پیام‌هایی که برای شما فرستاده شده\n"
-            "• /active_chats — گفتگوهای فعال یک ساعت اخیر\n"
+            "• /anon_inbox — صندوق پیام‌های ارسالی برای شما\n"
+            "• /active_chats — گفتگوهای فعال یک ساعت اخیر شما\n"
             "• /my_link — لینک ناشناس شما\n"
-            "• /my_musics — مدیریت موزیک‌ها\n"
-            "• پاسخ: روی پیام دریافتی Reply بزنید یا از دکمهٔ «✍️ پاسخ»."
+            "• /my_musics — مدیریت موزیک‌ها"
         )
     else:
         text = (
             "راهنما:\n"
-            "• /my_link — گرفتن لینک ناشناس شخصی شما (برای دوستانتان)\n"
-            "• با لینک دیگران می‌توانید به آن‌ها پیام ناشناس بدهید\n"
-            "• برای پاسخ به پیام دریافتی، دکمهٔ «✍️ پاسخ» را بزنید\n"
-            "• برای خروج از حالت ناشناس، /start را بزنید."
+            "• /my_link — گرفتن لینک ناشناس شخصی خودتان\n"
+            "• با باز کردن لینک دیگران می‌توانید به آن‌ها پیام ناشناس بفرستید\n"
+            "• برای خروج از حالت ارسال پیام، /start را بزنید."
         )
     await update.effective_message.reply_text(text)
 
@@ -384,28 +400,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     data = query.data or ""
 
-    if data == "go_anon_owner":
-        if user.id == OWNER_ID:
-            await query.message.reply_text("این گزینه برای تست از حساب دیگر استفاده می‌شود.")
-            return
-        anon_mode[user.id] = OWNER_ID
-        await query.message.reply_text(
-            f"شما در حال ارسال پیام ناشناس به {OWNER_DISPLAY_NAME} هستید. 🎭\n"
-            "پیام خود را بفرستید.\nبرای لغو، /start را بزنید."
-        )
-        return
-
     if data == "btn_get_link":
         await send_my_link(query, context, user.id)
         return
 
     if data == "btn_my_messages":
-        key = conv_key(user.id, user.id)
         mine = [
             (k, v) for k, v in anon_conversations.items()
             if k.split(":")[0] == str(user.id)
         ]
-        if user.id == OWNER_ID or not mine:
+        if not mine:
             await query.message.reply_text("📩 پیامی برای نمایش پیدا نشد.")
         else:
             lines = []
@@ -414,11 +418,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if isinstance(m, dict):
                         who = item.get("name", "کاربر") if m.get("from") == "user" else ANON_LABEL
                         lines.append(f"• {who}: {m.get('text', '[رسانه]')}")
-            await query.message.reply_text("📩 پیام‌های شما:\n" + "\n".join(lines))
+            await query.message.reply_text("📩 پیام‌های دریافت‌شدهٔ شما:\n" + "\n".join(lines))
         return
 
     if user.id != OWNER_ID:
-        # پاسخ کاربران عادی به پیام دریافتی
         if data.startswith("prep_reply_"):
             reply_target[user.id] = int(data.removeprefix("prep_reply_"))
             await query.message.reply_text(
@@ -478,7 +481,6 @@ def get_message_description(message):
 
 
 async def deliver_anon_message(context, sender, message, target_id):
-    """ارسال پیام ناشناس از sender به target_id + ثبت در تاریخچه."""
     key = conv_key(target_id, sender.id)
     item = anon_conversations.setdefault(key, {
         "name": sender.full_name,
@@ -496,18 +498,25 @@ async def deliver_anon_message(context, sender, message, target_id):
     item["count"] = item.get("count", 0) + 1
     save_data()
 
-    display = OWNER_DISPLAY_NAME if target_id == OWNER_ID else ANON_LABEL
-    header = (
-        f"📩 پیام ناشناس جدید برای {display}\n\n"
-        f"👤 نام فرستنده: {sender.full_name}\n"
-        f"🔗 یوزرنیم: {username_text(sender.username)}\n"
-        f"🆔 شناسه: {sender.id}"
-    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✍️ پاسخ ناشناس", callback_data=f"prep_reply_{sender.id}")
+    ]])
+
+    if target_id == OWNER_ID:
+        header = (
+            "📩 پیام ناشناس جدید\n\n"
+            f"👤 نام فرستنده: {sender.full_name}\n"
+            f"🔗 یوزرنیم: {username_text(sender.username)}\n"
+            f"🆔 شناسه: {sender.id}"
+        )
+    else:
+        header = (
+            "📩 یک پیام ناشناس جدید دریافت کردید.\n\n"
+            "هویت فرستنده برای شما مخفی است."
+        )
+
     await context.bot.send_message(chat_id=target_id, text=header)
 
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✍️ پاسخ به این گفتگو", callback_data=f"prep_reply_{sender.id}")
-    ]])
     copied = await context.bot.copy_message(
         chat_id=target_id,
         from_chat_id=message.chat_id,
@@ -537,10 +546,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.copy_message(
                     chat_id=target, from_chat_id=message.chat_id, message_id=message.message_id,
                 )
-                key = conv_key(target, target)
-                # ثبت پاسخ مالک در همان گفتگو
                 for k, item in anon_conversations.items():
-                    if k.split(":")[1] == str(target):
+                    if k.split(":")[0] == str(target) and k.split(":")[1] == str(target):
                         item.setdefault("messages", []).append({
                             "from": "owner", "text": get_message_description(message), "ts": time.time(),
                         })
@@ -554,23 +561,22 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("❌ ارسال نشد؛ شاید کاربر ربات را مسدود کرده باشد.")
             return
 
-        # فایل صوتی مالک -> ساخت لینک موزیک
         if message.audio or message.voice or (
             message.document and (message.document.mime_type or "").startswith("audio/")
         ):
             await receive_music(message, context)
         return
 
-    # --- پاسخ کاربر عادی ---
+    # --- پاسخ کاربر عادی به چت ناشناس خودش ---
     if user.id in reply_target:
         target = reply_target.pop(user.id)
         try:
-            await context.bot.send_message(chat_id=target, text=f"💬 پیام از {ANON_LABEL}:")
+            await context.bot.send_message(chat_id=target, text="💬 پیام جدید از طرف مخاطب ناشناس:")
             await context.bot.copy_message(
                 chat_id=target, from_chat_id=message.chat_id, message_id=message.message_id,
             )
             for k, item in anon_conversations.items():
-                if k.split(":")[0] == str(target) and k.split(":")[1] == str(user.id):
+                if k.split(":")[0] == str(user.id) and k.split(":")[1] == str(target):
                     item.setdefault("messages", []).append({
                         "from": "owner", "text": get_message_description(message), "ts": time.time(),
                     })
@@ -582,10 +588,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("❌ ارسال نشد.")
         return
 
-    # --- پیام ناشناس کاربر ---
+    # --- پیام ناشناس کاربر برای کسی که لینکه‌اش را باز کرده ---
     target_id = anon_mode.get(user.id)
     if not target_id:
-        return  # کاربر عادی که حالت ناشناس ندارد: نادیده گرفته می‌شود
+        return
 
     try:
         await deliver_anon_message(context, user, message, target_id)
