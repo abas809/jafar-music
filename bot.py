@@ -6,9 +6,9 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
     BotCommand,
+    BotCommandScopeChat,
+    MenuButtonCommands,
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -22,25 +22,15 @@ from telegram.ext import (
 # شناسه انحصاری مالک ربات (عباس)
 OWNER_ID = 6073046430
 
-# دیکشنری آهنگ‌های فعال
+# دیکشنری نگهداری موزیک‌های فعال
 shared_music = {}
 
-# نگهداری موقت فایل تا زمان انتخاب ساعت توسط مالک
+# نگهداری موقت اطلاعات فایل تا زمان انتخاب ساعت اعتبار
 pending_uploads = {}
-
-# کیبورد ثابت منوی پایین صفحه برای مالک
-OWNER_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("📋 لیست موزیک‌های فعال")],
-        [KeyboardButton("ℹ️ راهنما و وضعیت ربات")],
-    ],
-    resize_keyboard=True,
-    is_persistent=True,
-)
 
 
 async def health_check(request):
-    """وب‌سرور برای فعال ماندن روی Render توسط UptimeRobot"""
+    """پاسخ وب‌سرور برای زنده نگه داشتن سرور در Render توسط UptimeRobot"""
     return web.Response(text="Bot is running!")
 
 
@@ -55,17 +45,22 @@ async def start_web_server():
 
 
 def format_remaining_time(remaining_seconds):
-    """تبدیل ثانیه به فرمت خوانا"""
+    """تبدیل ثانیه به نمایش خوانا از زمان باقی‌مانده"""
     if remaining_seconds is None:
-        return "همیشگی (بدون انقضا)"
+        return "♾ همیشگی (بدون انقضا)"
     if remaining_seconds <= 0:
-        return "منقضی شده"
+        return "⚠️ منقضی شده"
     hours = int(remaining_seconds // 3600)
     minutes = int((remaining_seconds % 3600) // 60)
-    if hours > 24:
+    seconds = int(remaining_seconds % 60)
+
+    if hours >= 24:
         days = hours // 24
         return f"{days} روز و {hours % 24} ساعت"
-    return f"{hours} ساعت و {minutes} دقیقه"
+    elif hours > 0:
+        return f"{hours} ساعت و {minutes} دقیقه"
+    else:
+        return f"{minutes} دقیقه و {seconds} ثانیه"
 
 
 async def delete_expired_message(context: ContextTypes.DEFAULT_TYPE):
@@ -85,12 +80,31 @@ async def delete_expired_message(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(application):
-    """تنظیم خودکار منوی دستورات تلگرام (دکمه آبی Menu)"""
-    commands = [
-        BotCommand("start", "شروع مجدد ربات"),
-        BotCommand("my_musics", "مشاهده لیست موزیک‌های فعال"),
+    """تنظیم رسمی دکمه منو در کنار سنجاقک تلگرام"""
+    owner_commands = [
+        BotCommand("my_musics", "📋 لیست و تایم باقی‌مانده آهنگ‌ها"),
+        BotCommand("help", "ℹ️ راهنما و وضعیت ربات"),
+        BotCommand("start", "🔄 شروع مجدد ربات"),
     ]
-    await application.bot.set_my_commands(commands)
+    # تنظیم منو به صورت اختصاصی برای چت شما
+    try:
+        await application.bot.set_my_commands(
+            owner_commands, scope=BotCommandScopeChat(chat_id=OWNER_ID)
+        )
+        await application.bot.set_chat_menu_button(
+            chat_id=OWNER_ID, menu_button=MenuButtonCommands()
+        )
+    except Exception as e:
+        print(f"منوی اختصاصی تنظیم نشد: {e}")
+
+    # منوی پیش‌فرض برای بقیه
+    default_commands = [
+        BotCommand("start", "شروع ربات"),
+    ]
+    try:
+        await application.bot.set_my_commands(default_commands)
+    except Exception:
+        pass
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,11 +119,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption = data.get("caption") or f"🎵 {data.get('name', 'موزیک ارسالی')}"
 
             if data["file_type"] == "audio":
-                sent = await context.bot.send_audio(chat_id=user.id, audio=data["file_id"], caption=caption)
+                sent = await context.bot.send_audio(
+                    chat_id=user.id, audio=data["file_id"], caption=caption
+                )
             elif data["file_type"] == "voice":
-                sent = await context.bot.send_voice(chat_id=user.id, voice=data["file_id"], caption=caption)
+                sent = await context.bot.send_voice(
+                    chat_id=user.id, voice=data["file_id"], caption=caption
+                )
             else:
-                sent = await context.bot.send_document(chat_id=user.id, document=data["file_id"], caption=caption)
+                sent = await context.bot.send_document(
+                    chat_id=user.id, document=data["file_id"], caption=caption
+                )
 
             duration = data.get("duration_sec")
             if duration:
@@ -121,32 +141,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     data={"chat_id": user.id, "message_id": sent.message_id},
                 )
         else:
-            await update.message.reply_text("❌ متأسفانه این لینک منقضی یا باطل شده است.")
+            await update.message.reply_text(
+                "❌ متأسفانه این لینک منقضی یا باطل شده است."
+            )
         return
 
     # استارت معمولی
     if user.id == OWNER_ID:
+        # تضمین فعال بودن دکمه منو کنار سنجاقک
+        try:
+            await context.bot.set_chat_menu_button(
+                chat_id=user.id, menu_button=MenuButtonCommands()
+            )
+        except Exception:
+            pass
+
         await update.message.reply_text(
             "سلام عباس عزیز! خوش آمدی 👋\n\n"
-            "منوی مدیریت زیر دستت آماده است. برای شروع، هر موزیکی دوست داری برام بفرست!",
-            reply_markup=OWNER_KEYBOARD,
+            "🔘 دکمهٔ **Menu** در پایین سمت چپ (کنار گیره/سنجاقک) فعال شد.\n"
+            "هر زمان خواستی لیست موزیک‌ها و زمان باقی‌مانده را ببینی، کافیست روی **Menu** لمس کنی!\n\n"
+            "برای شروع، هر فایل صوتی یا وویسی که دوست داری برایم بفرست."
         )
     else:
-        await update.message.reply_text("سلام! برای دریافت فایل باید از لینکی که فرستنده داده استفاده کنید.")
+        await update.message.reply_text(
+            "سلام! برای دریافت فایل باید از لینکی که فرستنده داده استفاده کنید."
+        )
 
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """راهنمای سریع ربات برای مالک"""
+    """راهنمای ربات"""
     if update.effective_user.id != OWNER_ID:
         return
     text = (
         "ℹ️ **راهنمای ربات جعفَر موزیک:**\n\n"
-        "1️⃣ **ارسال آهنگ:** هر موزیک یا وویسی بفرستی، زمان اعتبار ازت پرسیده میشه.\n"
-        "2️⃣ **لینک اختصاصی:** لینکی که ربات میده رو برای هر کی بفرستی، موزیک براش باز میشه.\n"
-        "3️⃣ **حذف آنی:** زیر هر لینک و داخل منوی «لیست موزیک‌ها» دکمه حذف فوری داری.\n"
-        "4️⃣ **امنیت:** ربات فقط با آیدی شما کار میکنه و برای بقیه قفله."
+        "1️⃣ **ارسال آهنگ:** فایل صوتی رو بفرست تا گزینه‌های ساعت اعتبار برات بیاد.\n"
+        "2️⃣ **منوی کنار سنجاقک:** روی دکمه [ Menu ] بزن و گزینه «لیست و تایم باقی‌مانده» رو انتخاب کن.\n"
+        "3️⃣ **حذف فوری:** از داخل همون لیست می‌تونی هر آهنگی رو خواستی فوراً بسوزونی.\n"
+        "4️⃣ **امنیت کامل:** فقط با اکانت شما فایل پذیرفته میشه."
     )
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=OWNER_KEYBOARD)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,7 +220,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "chat_id": msg.chat_id,
     }
 
-    # دکمه‌های شیشه‌ای انتخاب زمان اعتبار فایل
+    # دکمه‌های شیشه‌ای انتخاب مدت اعتبار فایل
     keyboard = [
         [
             InlineKeyboardButton("⚡️ ۱ ساعت", callback_data=f"exp_{temp_id}_3600"),
@@ -213,7 +246,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تنظیم انقضا بر اساس دکمه انتخابی"""
+    """تنظیم انقضا بر اساس انتخاب"""
     query = update.callback_query
     await query.answer()
 
@@ -225,7 +258,7 @@ async def duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duration_sec = int(sec_str) if sec_str != "0" else None
 
     if temp_id not in pending_uploads:
-        await query.edit_message_text("⚠️ این فایل قبلاً ثبت شده یا زمان انتخاب تمام شده است.")
+        await query.edit_message_text("⚠️ این فایل قبلاً ثبت شده یا منقضی شده است.")
         return
 
     info = pending_uploads.pop(temp_id)
@@ -253,8 +286,8 @@ async def duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duration_text = format_remaining_time(duration_sec)
     await query.edit_message_text(
         f"✅ **لینک با موفقیت ساخته شد!**\n\n"
-        f"🎵 نام فایل: `{info['name']}`\n"
-        f"⏱ مدت اعتبار: **{duration_text}**\n\n"
+        f"🎵 نام: `{info['name']}`\n"
+        f"⏱ مدت اعتبار کل: **{duration_text}**\n\n"
         f"🔗 **لینک اشتراک:**\n`{share_link}`",
         reply_markup=reply_markup,
         parse_mode="Markdown",
@@ -274,20 +307,17 @@ async def duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_my_musics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """نمایش لیست فایل‌های فعال"""
+    """نمایش لیست فایل‌های فعال و تایم دقیق باقی‌مانده"""
     user = update.effective_user
     if user.id != OWNER_ID:
         return
 
     if not shared_music:
-        await update.message.reply_text(
-            "📭 در حال حاضر هیچ موزیک فعالی نداری!",
-            reply_markup=OWNER_KEYBOARD
-        )
+        await update.message.reply_text("📭 در حال حاضر هیچ موزیک فعالی نداری!")
         return
 
     bot_info = await context.bot.get_me()
-    await update.message.reply_text("📋 **لیست موزیک‌های فعال شما:**", parse_mode="Markdown")
+    await update.message.reply_text("📋 **لیست موزیک‌های فعال و زمان باقی‌مانده:**", parse_mode="Markdown")
 
     for m_id, item in list(shared_music.items()):
         if item["duration_sec"]:
@@ -295,7 +325,7 @@ async def list_my_musics(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rem = item["duration_sec"] - elapsed
             rem_text = format_remaining_time(rem)
         else:
-            rem_text = "♾ همیشگی (دائمی)"
+            rem_text = "♾ همیشگی (بدون انقضا)"
 
         link = f"https://t.me/{bot_info.username}?start={m_id}"
         keyboard = [
@@ -303,13 +333,13 @@ async def list_my_musics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         text = (
             f"🎵 **نام:** `{item['name']}`\n"
-            f"⏳ **زمان مانده:** {rem_text}\n"
-            f"🔗 `{link}`"
+            f"⏳ **تایم باقی‌مانده:** `{rem_text}`\n\n"
+            f"🔗 **لینک:**\n`{link}`"
         )
         await update.message.reply_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
 
 
@@ -319,7 +349,7 @@ async def delete_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
 
     if query.from_user.id != OWNER_ID:
-        await query.answer("شما دسترسی ندارید!", show_alert=True)
+        await query.answer("شما اجازه دسترسی ندارید!", show_alert=True)
         return
 
     callback_data = query.data
@@ -337,7 +367,7 @@ async def delete_button_callback(update: Update, context: ContextTypes.DEFAULT_T
             except Exception:
                 pass
 
-            await query.edit_message_text(f"🗑 فایل `{data.get('name', '')}` با موفقیت حذف و لینکش باطل شد.")
+            await query.edit_message_text(f"🗑 فایل `{data.get('name', '')}` حذف شد و لینکش باطل گردید.")
         else:
             await query.edit_message_text("این فایل قبلاً باطل شده است.")
 
@@ -354,16 +384,15 @@ def main():
         .build()
     )
 
-    # سرور داخلی UptimeRobot
+    # سرور سبک برای UptimeRobot
     application.job_queue.run_once(lambda ctx: start_web_server(), 0)
 
-    # دستورات و پیام‌های متنی منو
+    # دستورات منوی تلگرام
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("my_musics", list_my_musics))
-    application.add_handler(MessageHandler(filters.Regex("^📋 لیست موزیک‌های فعال$"), list_my_musics))
-    application.add_handler(MessageHandler(filters.Regex("^ℹ️ راهنما و وضعیت ربات$"), show_help))
+    application.add_handler(CommandHandler("help", show_help))
 
-    # هندلرهای صوت و دکمه‌ها
+    # فایل‌های صوتی و دکمه‌ها
     application.add_handler(
         MessageHandler(
             filters.AUDIO | filters.VOICE | filters.Document.Category("audio/"),
